@@ -10,30 +10,46 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from model_gcn import GAT, GCN, Rel_GAT
 from model_ner import BERT_NER
-from model_utils import LinearAttention, DotprodAttention, RelationAttention, Highway, mask_logits, SelfAttention, PointwiseFeedForward, DynamicLSTM# 引入自定义
+from model_utils import LinearAttention, DotprodAttention, RelationAttention, Highway, mask_logits, SelfAttention, PointwiseFeedForward, DynamicLSTM
 from tree import *
 from common.sublayer import MultiHeadedAttention
 from pytorch_transformers.modeling_bert import BertPooler
 
-# python MT/run.py --use_bert_global t --use_gat_feature t --use_ner_feature f --use_cross_attn t
 
-class CNN_ATT(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(CNN_ATT, self).__init__()
-        self.conv_q = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-        self.conv_k = nn.Conv1d(in_channels, out_channels, kernel_size=1)
-        self.conv_v = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+class GLF(nn.Module):
+    def __init__(self, hidden_size, num_heads, dropout=0.1):
+        super(GLF, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.dropout = dropout
 
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        q = self.conv_q(x)
-        k = self.conv_k(x)
-        v = self.conv_v(x)
-        attn = torch.matmul(q.transpose(1, 2), k)
-        attn = F.softmax(attn, dim=-1)
-        out = torch.matmul(attn, v.transpose(1, 2))
-        out = out.permute(0, 2, 1)
-        return out
+        self.global_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout)
+        self.local_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout)
+        self.fusion = nn.Linear(hidden_size * 2, hidden_size)
+
+    def forward(self, x, mask=None):
+        # x: (batch_size, seq_len, hidden_size)
+        # mask: (batch_size, seq_len)
+        x = x.transpose(0, 1)
+        global_out, _ = self.global_attn(x, x, x, key_padding_mask=mask)
+        sub_len = self.num_heads
+        sub_num = x.size(0) // sub_len
+        x = x.reshape(sub_num, sub_len, -1, self.hidden_size)  # (sub_num, sub_len, batch_size, hidden_size)
+
+        local_out = []
+        for i in range(sub_num):
+            sub_x = x[i]  # (sub_len, batch_size, hidden_size)
+            sub_out, _ = self.local_attn(sub_x, sub_x, sub_x)  # (sub_len, batch_size, hidden_size)
+            local_out.append(sub_out)
+
+        local_out = torch.cat(local_out, dim=0)  # (seq_len, batch_size, hidden_size)
+
+        fusion_out = torch.cat([global_out, local_out], dim=-1)  # (seq_len, batch_size, hidden_size * 2)
+        fusion_out = self.fusion(fusion_out)  # (seq_len, batch_size, hidden_size)
+
+        fusion_out = fusion_out.transpose(0, 1)
+
+        return fusion_out
 
 
 class GLU(nn.Module):
@@ -97,12 +113,8 @@ class Aspect_Bert_GAT(nn.Module):
 
         #
         self.cross_attn = MultiHeadedAttention(args.cross_attn_heads, 768)
+        self.gtu = GLF(args.embedding_dim, args.cross_attn_heads)  # 3
         # self.glu = GLU(args.embedding_dim, args.embedding_dim)  # 2
-        ############
-        # self.g_SA = SelfAttention(config, args)
-        # self.l_SA = SelfAttention(config, args)
-        # self.dropout = nn.Dropout(args.dropout)
-        # self.bert_sa = SelfAttention(config, args)
 
 
     def feature_dynamic_weighted(self, text_local_indices, aspect_indices, distances_input=None):
@@ -158,7 +170,7 @@ class Aspect_Bert_GAT(nn.Module):
             cdw_vec = self.feature_dynamic_weighted(input_ids, input_aspect_ids, ncon_num_ids)
             bert_local_output = torch.mul(bert_local_out, cdw_vec)
             # bert_local_output = self.conv1(bert_local_output)
-            out_cat = torch.cat((bert_local_output, feature_output), dim=-1)
+            out_cat = torch.cat((bert_local_output, feature_output), dim=-1) # 残差归一化后86.43 不行
             mean_pool = self.mean_pooling_double(out_cat)
             pooled_out = self.bert_pooler(mean_pool)
         # pooled_out = pooled_out.unsqueeze(-1)
