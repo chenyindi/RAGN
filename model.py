@@ -15,43 +15,6 @@ from tree import *
 from common.sublayer import MultiHeadedAttention
 from pytorch_transformers.modeling_bert import BertPooler
 
-
-class GLF(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout=0.1):
-        super(GLF, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.dropout = dropout
-
-        self.global_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout)
-        self.local_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout)
-        self.fusion = nn.Linear(hidden_size * 2, hidden_size)
-
-    def forward(self, x, mask=None):
-        # x: (batch_size, seq_len, hidden_size)
-        # mask: (batch_size, seq_len)
-        x = x.transpose(0, 1)
-        global_out, _ = self.global_attn(x, x, x, key_padding_mask=mask)
-        sub_len = self.num_heads
-        sub_num = x.size(0) // sub_len
-        x = x.reshape(sub_num, sub_len, -1, self.hidden_size)  # (sub_num, sub_len, batch_size, hidden_size)
-
-        local_out = []
-        for i in range(sub_num):
-            sub_x = x[i]  # (sub_len, batch_size, hidden_size)
-            sub_out, _ = self.local_attn(sub_x, sub_x, sub_x)  # (sub_len, batch_size, hidden_size)
-            local_out.append(sub_out)
-
-        local_out = torch.cat(local_out, dim=0)  # (seq_len, batch_size, hidden_size)
-
-        fusion_out = torch.cat([global_out, local_out], dim=-1)  # (seq_len, batch_size, hidden_size * 2)
-        fusion_out = self.fusion(fusion_out)  # (seq_len, batch_size, hidden_size)
-
-        fusion_out = fusion_out.transpose(0, 1)
-
-        return fusion_out
-
-
 class GLU(nn.Module):
     def __init__(self, in_features, out_features):
         super(GLU, self).__init__()
