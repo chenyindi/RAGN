@@ -13,3 +13,5 @@
   The Twitter dataset is accessible from https://datahack.analyticsvidhya.com/.
 # Running
 - Run: ./run.sh
+# Note
+Our code is still being organized and will be released soon.
